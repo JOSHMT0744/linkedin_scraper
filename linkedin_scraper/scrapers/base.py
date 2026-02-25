@@ -165,6 +165,7 @@ class BaseScraper:
         logger.info(f"Navigating to: {url}")
         # Use type: ignore to bypass strict typing
         await self.page.goto(url, wait_until=wait_until, timeout=timeout)  # type: ignore
+        await asyncio.sleep(2.5)
         await self.check_rate_limit()
     
     async def extract_list_items(
