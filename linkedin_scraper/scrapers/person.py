@@ -41,52 +41,68 @@ class PersonScraper(BaseScraper):
             ScrapingError: If scraping fails
         """
         await self.callback.on_start("person", linkedin_url)
+        logger.info("Starting person scrape: %s", linkedin_url)
 
         try:
             # Navigate to profile first (this loads the page with our session)
+            logger.info("Navigating to profile...")
             await self.navigate_and_wait(linkedin_url)
             await self.callback.on_progress("Navigated to profile", 10)
+            logger.info("Navigation complete")
 
             # Now check if logged in
+            logger.info("Checking login state...")
             await self.ensure_logged_in()
+            logger.info("Logged in confirmed")
 
             # Wait for main content
+            logger.info("Waiting for main content...")
             await self.page.wait_for_selector("main", timeout=10000)
             await self.wait_and_focus(1)
 
             # Get name and location
+            logger.info("Getting name and location...")
             name, location = await self._get_name_and_location()
             await self.callback.on_progress(f"Got name: {name}", 20)
 
             # Check open to work
+            logger.info("Checking open to work...")
             open_to_work = await self._check_open_to_work()
 
             # Get about
+            logger.info("Getting about section...")
             about = await self._get_about()
             await self.callback.on_progress("Got about section", 30)
 
             # Scroll to load content
+            logger.info("Scrolling to load content...")
             await self.scroll_page_to_half()
             await self.scroll_page_to_bottom(pause_time=0.5, max_scrolls=3)
 
             # Get experiences
+            logger.info("Getting experiences...")
             experiences = await self._get_experiences(linkedin_url)
             await self.callback.on_progress(f"Got {len(experiences)} experiences", 60)
 
+            logger.info("Getting educations...")
             educations = await self._get_educations(linkedin_url)
             await self.callback.on_progress(f"Got {len(educations)} educations", 50)
 
+            logger.info("Getting interests...")
             interests = await self._get_interests(linkedin_url)
             await self.callback.on_progress(f"Got {len(interests)} interests", 65)
 
+            logger.info("Getting accomplishments...")
             accomplishments = await self._get_accomplishments(linkedin_url)
             await self.callback.on_progress(
                 f"Got {len(accomplishments)} accomplishments", 85
             )
 
+            logger.info("Getting contacts...")
             contacts = await self._get_contacts(linkedin_url)
             await self.callback.on_progress(f"Got {len(contacts)} contacts", 95)
 
+            logger.info("Building Person object...")
             person = Person(
                 linkedin_url=linkedin_url,
                 name=name,
