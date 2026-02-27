@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import random
 from typing import Optional
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
@@ -165,7 +166,10 @@ class BaseScraper:
         logger.info(f"Navigating to: {url}")
         # Use type: ignore to bypass strict typing
         await self.page.goto(url, wait_until=wait_until, timeout=timeout)  # type: ignore
-        await asyncio.sleep(2.5)
+        # Wait with jitter so content renders and requests look less uniform
+        base_wait = 2.0
+        jitter = random.uniform(0.0, 3.0)
+        await asyncio.sleep(base_wait + jitter)
         await self.check_rate_limit()
     
     async def extract_list_items(
@@ -228,9 +232,10 @@ class BaseScraper:
         Wait and focus window (helps with dynamic loading).
         
         Args:
-            duration: Time to wait in seconds
+            duration: Base time to wait in seconds (random jitter is added)
         """
-        await asyncio.sleep(duration)
+        jitter = random.uniform(0.0, duration * 0.5)
+        await asyncio.sleep(duration + jitter)
         try:
             # Bring page to front
             await self.page.bring_to_front()
