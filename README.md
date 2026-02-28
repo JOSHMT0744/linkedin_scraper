@@ -4,7 +4,9 @@
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-Async LinkedIn scraper built with Playwright for extracting profile, company, and job data from LinkedIn.
+Async LinkedIn scraper built with **Playwright** for extracting profile, company, job, and post data. Uses Pydantic models and supports session reuse and progress callbacks.
+
+**Contents:** [Breaking changes (v3)](#breaking-changes-in-v300) · [Quick testing](#quick-testing) · [Features](#features) · [Installation](#installation) · [Quick start](#quick-start) · [Authentication](#authentication) · [Progress](#progress-tracking) · [Data models](#data-models) · [Advanced](#advanced-usage) · [Testing](#testing)
 
 ## ⚠️ Breaking Changes in v3.0.0
 
@@ -34,7 +36,7 @@ from linkedin_scraper import BrowserManager, PersonScraper
 
 async def main():
     async with BrowserManager() as browser:
-        await browser.load_session("session.json")
+        await browser.load_session("linkedin_session.json")
         scraper = PersonScraper(browser.page)
         person = await scraper.scrape("https://linkedin.com/in/username")
         print(person.name)
@@ -48,29 +50,36 @@ pip install linkedin-scraper==2.11.2
 ```
 ## Quick Testing
 
-To test that this works, you can clone this repo, install dependencies with
-```
+To test that this works, clone the repo, install dependencies, and create a session:
+
+```bash
 git clone https://github.com/joeyism/linkedin_scraper.git
 cd linkedin_scraper
-pip3 install -e .
+pip install -e .
+playwright install chromium
+python samples/create_session.py
 ```
-then run
+
+Then run any of the sample scripts (they use `linkedin_session.json` created above):
+
+```bash
+python samples/scrape_person.py
+python samples/scrape_company.py
+python samples/scrape_jobs.py
+python samples/scrape_company_posts.py
 ```
-python3 samples/create_session.py
-python3 samples/scrape_company.py
-python3 samples/scrape_person.py
-```
-and you will see the scraping in action.
+
+For more on running tests, see [TESTING.md](TESTING.md).
 
 ---
 
 ## Features
 
 - **Person Profiles** - Scrape comprehensive profile information
-  - Basic info (name, headline, location, about)
+  - Basic info (name, location, about)
   - Work experience with details
   - Education history
-  - Skills and accomplishments
+  - Interests, accomplishments, and contact info
   
 - **Company Pages** - Extract company information
   - Company overview and details
@@ -115,8 +124,8 @@ from linkedin_scraper import BrowserManager, PersonScraper
 async def main():
     # Initialize browser
     async with BrowserManager(headless=False) as browser:
-        # Load authenticated session
-        await browser.load_session("session.json")
+        # Load authenticated session (create first via samples/create_session.py)
+        await browser.load_session("linkedin_session.json")
         
         # Create scraper
         scraper = PersonScraper(browser.page)
@@ -126,8 +135,8 @@ async def main():
         
         # Access data
         print(f"Name: {person.name}")
-        print(f"Headline: {person.headline}")
         print(f"Location: {person.location}")
+        print(f"About: {person.about[:100] if person.about else 'N/A'}...")
         print(f"Experiences: {len(person.experiences)}")
         print(f"Education: {len(person.educations)}")
 
@@ -141,7 +150,7 @@ from linkedin_scraper import CompanyScraper
 
 async def scrape_company():
     async with BrowserManager(headless=False) as browser:
-        await browser.load_session("session.json")
+        await browser.load_session("linkedin_session.json")
         
         scraper = CompanyScraper(browser.page)
         company = await scraper.scrape("https://linkedin.com/company/microsoft/")
@@ -149,34 +158,40 @@ async def scrape_company():
         print(f"Company: {company.name}")
         print(f"Industry: {company.industry}")
         print(f"Size: {company.company_size}")
-        print(f"About: {company.about_us[:200]}...")
+        print(f"About: {company.about_us[:200] if company.about_us else 'N/A'}...")
 
 asyncio.run(scrape_company())
 ```
 
 ### Job Scraping
 
-```python
-from linkedin_scraper import JobSearchScraper
+`JobSearchScraper` returns job URLs; use `JobScraper` to fetch full details for each:
 
-async def search_jobs():
+```python
+from linkedin_scraper import BrowserManager, JobSearchScraper, JobScraper
+
+async def search_and_scrape_jobs():
     async with BrowserManager(headless=False) as browser:
-        await browser.load_session("session.json")
+        await browser.load_session("linkedin_session.json")
         
-        scraper = JobSearchScraper(browser.page)
-        jobs = await scraper.search(
+        # Search returns a list of job URLs
+        search_scraper = JobSearchScraper(browser.page)
+        job_urls = await search_scraper.search(
             keywords="Python Developer",
             location="San Francisco",
             limit=10
         )
         
-        for job in jobs:
-            print(f"{job.title} at {job.company}")
+        # Scrape full details for each job
+        job_scraper = JobScraper(browser.page)
+        for url in job_urls:
+            job = await job_scraper.scrape(url)
+            print(f"{job.job_title} at {job.company}")
             print(f"Location: {job.location}")
             print(f"Link: {job.linkedin_url}")
             print("---")
 
-asyncio.run(search_jobs())
+asyncio.run(search_and_scrape_jobs())
 ```
 
 ### Company Posts Scraping
@@ -186,7 +201,7 @@ from linkedin_scraper import BrowserManager, CompanyPostsScraper
 
 async def scrape_company_posts():
     async with BrowserManager(headless=False) as browser:
-        await browser.load_session("session.json")
+        await browser.load_session("linkedin_session.json")
         
         scraper = CompanyPostsScraper(browser.page)
         posts = await scraper.scrape(
@@ -223,8 +238,8 @@ async def create_session():
         print("Please log in to LinkedIn...")
         await wait_for_manual_login(browser.page, timeout=300)
         
-        # Save session
-        await browser.save_session("session.json")
+        # Save session for reuse
+        await browser.save_session("linkedin_session.json")
         print("✓ Session saved!")
 
 asyncio.run(create_session())
@@ -246,9 +261,21 @@ async def login():
         )
         
         # Save session for reuse
-        await browser.save_session("session.json")
+        await browser.save_session("linkedin_session.json")
 
 asyncio.run(login())
+```
+
+### Option 3: Cookie-based login
+
+```python
+from linkedin_scraper import BrowserManager, login_with_cookie
+
+async def login_with_cookie_session():
+    async with BrowserManager(headless=False) as browser:
+        # Login using a cookie string (e.g. from browser dev tools)
+        await login_with_cookie(browser.page, cookie_value="your_li_at_cookie_value")
+        await browser.save_session("linkedin_session.json")
 ```
 
 ## Progress Tracking
@@ -262,7 +289,7 @@ async def scrape_with_progress():
     callback = ConsoleCallback()  # Prints progress to console
     
     async with BrowserManager(headless=False) as browser:
-        await browser.load_session("session.json")
+        await browser.load_session("linkedin_session.json")
         
         scraper = PersonScraper(browser.page, callback=callback)
         person = await scraper.scrape("https://linkedin.com/in/williamhgates/")
@@ -297,42 +324,52 @@ All scraped data is returned as Pydantic models:
 
 ```python
 class Person(BaseModel):
-    name: str
-    headline: Optional[str]
+    linkedin_url: str
+    name: Optional[str]
     location: Optional[str]
     about: Optional[str]
-    linkedin_url: str
+    open_to_work: bool
     experiences: List[Experience]
     educations: List[Education]
-    skills: List[str]
-    accomplishments: Optional[Accomplishment]
+    interests: List[Interest]
+    accomplishments: List[Accomplishment]
+    contacts: List[Contact]
 ```
 
 ### Company
 
 ```python
 class Company(BaseModel):
-    name: str
-    industry: Optional[str]
-    company_size: Optional[str]
+    linkedin_url: str
+    name: Optional[str]
+    about_us: Optional[str]
+    website: Optional[str]
+    phone: Optional[str]
     headquarters: Optional[str]
     founded: Optional[str]
-    specialties: List[str]
-    about: Optional[str]
-    linkedin_url: str
+    industry: Optional[str]
+    company_type: Optional[str]
+    company_size: Optional[str]
+    specialties: Optional[str]
+    headcount: Optional[int]
+    showcase_pages: List[CompanySummary]
+    affiliated_companies: List[CompanySummary]
+    employees: List[Employee]
 ```
 
 ### Job
 
 ```python
 class Job(BaseModel):
-    title: str
-    company: str
-    location: Optional[str]
-    description: Optional[str]
-    employment_type: Optional[str]
-    seniority_level: Optional[str]
     linkedin_url: str
+    job_title: Optional[str]
+    company: Optional[str]
+    company_linkedin_url: Optional[str]
+    location: Optional[str]
+    posted_date: Optional[str]
+    applicant_count: Optional[str]
+    job_description: Optional[str]
+    benefits: Optional[str]
 ```
 
 ### Post
@@ -347,6 +384,8 @@ class Post(BaseModel):
     comments_count: Optional[int]
     reposts_count: Optional[int]
     image_urls: List[str]
+    video_url: Optional[str]
+    article_url: Optional[str]
 ```
 
 ## Advanced Usage
@@ -397,13 +436,21 @@ except ProfileNotFoundError:
 
 5. **Respect LinkedIn** - Don't scrape aggressively, respect rate limits
 
+## Testing
+
+- **Unit tests** (no LinkedIn required): `pytest -m "not integration" -v`
+- **Full suite** (requires `linkedin_session.json`): `pytest -v`
+
+See [TESTING.md](TESTING.md) for details.
+
 ## Requirements
 
 - Python 3.8+
-- Playwright
+- Playwright 1.40+
 - Pydantic 2.0+
 - aiofiles
-- python-dotenv (optional, for credentials)
+- python-dotenv (for loading credentials from env)
+- requests, lxml
 
 ## License
 
