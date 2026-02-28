@@ -1,6 +1,8 @@
 """Person/Profile scraper for LinkedIn."""
 
+import asyncio
 import logging
+import random
 from typing import Optional
 from urllib.parse import urljoin
 from playwright.async_api import Page
@@ -26,12 +28,13 @@ class PersonScraper(BaseScraper):
         """
         super().__init__(page, callback)
 
-    async def scrape(self, linkedin_url: str) -> Person:
+    async def scrape(self, linkedin_url: str, reduced_data: bool = False) -> Person:
         """
         Scrape a LinkedIn person profile.
 
         Args:
             linkedin_url: LinkedIn profile URL
+            reduced_data: If True, only fetch name, location, about, and first experience (no contact overlay). Used after first rate limit of the day.
 
         Returns:
             Person object with all scraped data
@@ -40,75 +43,101 @@ class PersonScraper(BaseScraper):
             AuthenticationError: If not logged in
             ScrapingError: If scraping fails
         """
+        logger.info(f"Starting person scraping: {linkedin_url} (reduced_data={reduced_data})")
         await self.callback.on_start("person", linkedin_url)
-        logger.info("Starting person scrape: %s", linkedin_url)
 
         try:
-            # Navigate to profile first (this loads the page with our session)
-            logger.info("Navigating to profile...")
-            await self.navigate_and_wait(linkedin_url)
+            # Navigate to profile first (this loads the page with our session).
+            # NOTE: we intentionally do NOT call navigate_and_wait here, so the initial
+            # navigation does not perform an early detect_rate_limit() check. This lets
+            # callers inspect the page even if LinkedIn is returning a rate-limit or
+            # checkpoint screen for this profile URL. Subsequent navigations (if any)
+            # still use navigate_and_wait and will respect rate-limit detection.
+            await self.page.goto(linkedin_url, wait_until="domcontentloaded")
+            await asyncio.sleep(3 + random.uniform(0, 4))  # 3–7s jittered wait
             await self.callback.on_progress("Navigated to profile", 10)
-            logger.info("Navigation complete")
 
-            # Now check if logged in
-            logger.info("Checking login state...")
-            await self.ensure_logged_in()
-            logger.info("Logged in confirmed")
+            # Check if page exists
+            await self.check_rate_limit()
 
-            # Wait for main content
-            logger.info("Waiting for main content...")
-            await self.page.wait_for_selector("main", timeout=10000)
-            await self.wait_and_focus(1)
+            # Light scroll before reading (human-like)
+            try:
+                scroll_px = int(random.uniform(150, 400))
+                await self.page.evaluate(f"window.scrollBy(0, {scroll_px})")
+                await asyncio.sleep(0.5 + random.uniform(0, 1))
+            except Exception:
+                pass
 
             # Get name and location
-            logger.info("Getting name and location...")
+            print("Getting name and location")
             name, location = await self._get_name_and_location()
             await self.callback.on_progress(f"Got name: {name}", 20)
 
-            # Check open to work
-            logger.info("Checking open to work...")
-            open_to_work = await self._check_open_to_work()
-
             # Get about
-            logger.info("Getting about section...")
+            print("Getting about")
             about = await self._get_about()
             await self.callback.on_progress("Got about section", 30)
 
+            if reduced_data:
+                await self.scroll_page_to_half()
+                experiences_list = await self._get_experiences(linkedin_url)
+                experiences = experiences_list[:1] if experiences_list else []
+                await self.callback.on_progress(f"Got {len(experiences)} experience (reduced)", 60)
+                person = Person(
+                    linkedin_url=linkedin_url,
+                    name=name,
+                    location=location,
+                    about=about,
+                    experiences=experiences,
+                    educations=[],
+                    interests=[],
+                    accomplishments=[],
+                    contacts=[],
+                )
+                await self.callback.on_progress("Scraping complete (reduced)", 100)
+                await self.callback.on_complete("person", person)
+                return person
+
             # Scroll to load content
-            logger.info("Scrolling to load content...")
+            print("Scrolling to load content")
             await self.scroll_page_to_half()
             await self.scroll_page_to_bottom(pause_time=0.5, max_scrolls=3)
 
             # Get experiences
-            logger.info("Getting experiences...")
+            print("Getting experiences")
             experiences = await self._get_experiences(linkedin_url)
             await self.callback.on_progress(f"Got {len(experiences)} experiences", 60)
+            await asyncio.sleep(1 + random.uniform(0, 2))  # Pause between sections
 
-            logger.info("Getting educations...")
+            # Get educations
+            print("Getting educations")
             educations = await self._get_educations(linkedin_url)
             await self.callback.on_progress(f"Got {len(educations)} educations", 50)
+            await asyncio.sleep(1 + random.uniform(0, 2))  # Pause between sections
 
-            logger.info("Getting interests...")
+            # Get interests
+            print("Getting interests")
             interests = await self._get_interests(linkedin_url)
             await self.callback.on_progress(f"Got {len(interests)} interests", 65)
+            await asyncio.sleep(1 + random.uniform(0, 2))  # Pause between sections
 
-            logger.info("Getting accomplishments...")
+            # Get accomplishments (from main page sections only, no details/... navigation)
+            print("Getting accomplishments (main page only)")
             accomplishments = await self._get_accomplishments(linkedin_url)
             await self.callback.on_progress(
                 f"Got {len(accomplishments)} accomplishments", 85
             )
 
-            logger.info("Getting contacts...")
-            contacts = await self._get_contacts(linkedin_url)
-            await self.callback.on_progress(f"Got {len(contacts)} contacts", 95)
+            # Get contacts (can be extended later to use overlay if needed)
+            contacts = []
 
-            logger.info("Building Person object...")
+            # Create person object (only fields required by our caller)
+            print("Creating person object")
             person = Person(
                 linkedin_url=linkedin_url,
                 name=name,
                 location=location,
                 about=about,
-                open_to_work=open_to_work,
                 experiences=experiences,
                 educations=educations,
                 interests=interests,
@@ -172,62 +201,68 @@ class PersonScraper(BaseScraper):
             logger.debug(f"Error getting about section: {e}")
             return None
 
+    async def _find_section_by_heading(self, heading_text: str):
+        """
+        Find a section container on the main profile page by its heading text.
+
+        This looks for h2/h3 elements containing the heading text and then returns
+        a nearby ancestor that likely wraps the section content.
+        """
+        # Try h2 first, then h3 as a fallback
+        heading = self.page.locator(f'h2:has-text("{heading_text}")').first
+        if await heading.count() == 0:
+            heading = self.page.locator(f'h3:has-text("{heading_text}")').first
+        if await heading.count() == 0:
+            return None
+
+        # Prefer an ancestor that contains a list; fall back to a generic ancestor
+        for xpath in (
+            'xpath=ancestor::*[.//ul or .//ol][1]',
+            'xpath=ancestor::section[1]',
+            'xpath=ancestor::div[1]',
+        ):
+            section = heading.locator(xpath)
+            if await section.count() > 0:
+                return section.first
+
+        return None
+
+    async def _list_items_in_section(self, section_root):
+        """
+        Given a section root, return a list of item containers representing entries
+        in that section (e.g., experiences, educations, languages).
+        """
+        if section_root is None:
+            return []
+
+        # First, look for standard list items
+        items = await section_root.locator('ul > li, ol > li').all()
+        if items:
+            return items
+
+        # Fallback: generic list-like containers
+        items = await section_root.locator('[role="listitem"], .pvs-list__paged-list-item').all()
+        if items:
+            return items
+
+        return []
+
     async def _get_experiences(self, base_url: str) -> list[Experience]:
         """Extract experiences from the main profile page Experience section."""
         experiences = []
 
         try:
-            experience_heading = self.page.locator('h2:has-text("Experience")').first
-            
-            if await experience_heading.count() > 0:
-                experience_section = experience_heading.locator('xpath=ancestor::*[.//ul or .//ol][1]')
-                if await experience_section.count() == 0:
-                    experience_section = experience_heading.locator('xpath=ancestor::*[4]')
-                
-                if await experience_section.count() > 0:
-                    items = await experience_section.locator('ul > li, ol > li').all()
-                    
-                    for item in items:
-                        try:
-                            exp = await self._parse_main_page_experience(item)
-                            if exp:
-                                experiences.append(exp)
-                        except Exception as e:
-                            logger.debug(f"Error parsing experience from main page: {e}")
-                            continue
-            
-            if not experiences:
-                exp_url = urljoin(base_url, "details/experience")
-                await self.navigate_and_wait(exp_url)
-                await self.page.wait_for_selector("main", timeout=10000)
-                await self.wait_and_focus(1.5)
-                await self.scroll_page_to_half()
-                await self.scroll_page_to_bottom(pause_time=0.5, max_scrolls=5)
+            section = await self._find_section_by_heading("Experience")
+            items = await self._list_items_in_section(section) if section is not None else []
 
-                items = []
-                main_element = self.page.locator('main')
-                if await main_element.count() > 0:
-                    list_items = await main_element.locator('list > listitem, ul > li').all()
-                    if list_items:
-                        items = list_items
-                
-                if not items:
-                    old_list = self.page.locator(".pvs-list__container").first
-                    if await old_list.count() > 0:
-                        items = await old_list.locator(".pvs-list__paged-list-item").all()
-
-                for item in items:
-                    try:
-                        result = await self._parse_experience_item(item)
-                        if result:
-                            if isinstance(result, list):
-                                experiences.extend(result)
-                            else:
-                                experiences.append(result)
-                    except Exception as e:
-                        logger.debug(f"Error parsing experience item: {e}")
-                        continue
-
+            for item in items:
+                try:
+                    exp = await self._parse_main_page_experience(item)
+                    if exp:
+                        experiences.append(exp)
+                except Exception as e:
+                    logger.debug(f"Error parsing experience from main page: {e}")
+                    continue
         except Exception as e:
             logger.warning(
                 f"Error getting experiences: {e}. The experience section may not be available or the page structure has changed."
@@ -539,54 +574,17 @@ class PersonScraper(BaseScraper):
         educations = []
 
         try:
-            education_heading = self.page.locator('h2:has-text("Education")').first
-            
-            if await education_heading.count() > 0:
-                education_section = education_heading.locator('xpath=ancestor::*[.//ul or .//ol][1]')
-                if await education_section.count() == 0:
-                    education_section = education_heading.locator('xpath=ancestor::*[4]')
-                
-                if await education_section.count() > 0:
-                    items = await education_section.locator('ul > li, ol > li').all()
-                    
-                    for item in items:
-                        try:
-                            edu = await self._parse_main_page_education(item)
-                            if edu:
-                                educations.append(edu)
-                        except Exception as e:
-                            logger.debug(f"Error parsing education from main page: {e}")
-                            continue
-            
-            if not educations:
-                edu_url = urljoin(base_url, "details/education")
-                await self.navigate_and_wait(edu_url)
-                await self.page.wait_for_selector("main", timeout=10000)
-                await self.wait_and_focus(2)
-                await self.scroll_page_to_half()
-                await self.scroll_page_to_bottom(pause_time=0.5, max_scrolls=5)
+            section = await self._find_section_by_heading("Education")
+            items = await self._list_items_in_section(section) if section is not None else []
 
-                items = []
-                main_element = self.page.locator('main')
-                if await main_element.count() > 0:
-                    list_items = await main_element.locator('ul > li, ol > li').all()
-                    if list_items:
-                        items = list_items
-                
-                if not items:
-                    old_list = self.page.locator(".pvs-list__container").first
-                    if await old_list.count() > 0:
-                        items = await old_list.locator(".pvs-list__paged-list-item").all()
-
-                for item in items:
-                    try:
-                        edu = await self._parse_education_item(item)
-                        if edu:
-                            educations.append(edu)
-                    except Exception as e:
-                        logger.debug(f"Error parsing education item: {e}")
-                        continue
-
+            for item in items:
+                try:
+                    edu = await self._parse_main_page_education(item)
+                    if edu:
+                        educations.append(edu)
+                except Exception as e:
+                    logger.debug(f"Error parsing education from main page: {e}")
+                    continue
         except Exception as e:
             logger.warning(
                 f"Error getting educations: {e}. The education section may not be publicly visible or the page structure has changed."
@@ -776,15 +774,12 @@ class PersonScraper(BaseScraper):
         interests = []
 
         try:
-            interests_heading = self.page.locator('h2:has-text("Interests")').first
-            
-            if await interests_heading.count() > 0:
-                interests_section = interests_heading.locator('xpath=ancestor::*[.//tablist or .//*[@role="tablist"]][1]')
-                if await interests_section.count() == 0:
-                    interests_section = interests_heading.locator('xpath=ancestor::*[4]')
-                
-                tabs = await interests_section.locator('[role="tab"], tab').all() if await interests_section.count() > 0 else []
-                
+            section = await self._find_section_by_heading("Interests")
+            if section is not None:
+                # Interests typically use a tablist; reuse the existing tab/click logic
+                interests_section = section
+                tabs = await interests_section.locator('[role="tab"], tab').all()
+
                 if tabs:
                     for tab in tabs:
                         try:
@@ -800,7 +795,7 @@ class PersonScraper(BaseScraper):
                             tabpanel = interests_section.locator('[role="tabpanel"]').first
                             if await tabpanel.count() > 0:
                                 list_items = await tabpanel.locator('li, listitem').all()
-                                
+
                                 for item in list_items:
                                     try:
                                         interest = await self._parse_interest_item(item, category)
@@ -812,46 +807,6 @@ class PersonScraper(BaseScraper):
                         except Exception as e:
                             logger.debug(f"Error processing interest tab: {e}")
                             continue
-            
-            if not interests:
-                interests_url = urljoin(base_url, "details/interests/")
-                await self.navigate_and_wait(interests_url)
-                await self.page.wait_for_selector("main", timeout=10000)
-                await self.wait_and_focus(1.5)
-
-                tabs = await self.page.locator('[role="tab"], tab').all()
-
-                if not tabs:
-                    logger.debug("No interests tabs found on profile")
-                    return interests
-
-                for tab in tabs:
-                    try:
-                        tab_name = await tab.text_content()
-                        if not tab_name:
-                            continue
-                        tab_name = tab_name.strip()
-                        category = self._map_interest_tab_to_category(tab_name)
-
-                        await tab.click()
-                        await self.wait_and_focus(0.8)
-
-                        tabpanel = self.page.locator('[role="tabpanel"], tabpanel').first
-                        list_items = await tabpanel.locator("listitem, li, .pvs-list__paged-list-item").all()
-
-                        for item in list_items:
-                            try:
-                                interest = await self._parse_interest_item(item, category)
-                                if interest:
-                                    interests.append(interest)
-                            except Exception as e:
-                                logger.debug(f"Error parsing interest item: {e}")
-                                continue
-
-                    except Exception as e:
-                        logger.debug(f"Error processing interest tab: {e}")
-                        continue
-
         except Exception as e:
             logger.warning(f"Error getting interests: {e}")
 
@@ -897,56 +852,41 @@ class PersonScraper(BaseScraper):
     async def _get_accomplishments(self, base_url: str) -> list[Accomplishment]:
         accomplishments = []
 
-        accomplishment_sections = [
-            ("certifications", "certification"),
-            ("honors", "honor"),
-            ("publications", "publication"),
-            ("patents", "patent"),
-            ("courses", "course"),
-            ("projects", "project"),
-            ("languages", "language"),
-            ("organizations", "organization"),
-        ]
+        # For rate-limit reasons, we only parse accomplishments that are visible on
+        # the main profile page. Currently we focus on the Languages section.
 
-        for url_path, category in accomplishment_sections:
-            try:
-                section_url = urljoin(base_url, f"details/{url_path}/")
-                await self.navigate_and_wait(section_url)
-                await self.page.wait_for_selector("main", timeout=10000)
-                await self.wait_and_focus(1)
+        try:
+            languages_section = await self._find_section_by_heading("Languages")
+            if languages_section is not None:
+                # Heuristic: gather all <p> elements inside the Languages section.
+                # These typically appear in pairs: [language, proficiency].
+                ps = await languages_section.locator("p").all()
+                texts: list[str] = []
+                for p in ps:
+                    text = await p.text_content()
+                    if text and text.strip():
+                        texts.append(text.strip())
 
-                nothing_to_see = await self.page.locator(
-                    'text="Nothing to see for now"'
-                ).count()
-                if nothing_to_see > 0:
-                    continue
-
-                main_list = self.page.locator(
-                    ".pvs-list__container, main ul, main ol"
-                ).first
-                if await main_list.count() == 0:
-                    continue
-
-                items = await main_list.locator(".pvs-list__paged-list-item").all()
-                if not items:
-                    items = await main_list.locator("> li").all()
-
-                seen_titles = set()
-                for item in items:
-                    try:
-                        accomplishment = await self._parse_accomplishment_item(
-                            item, category
-                        )
-                        if accomplishment and accomplishment.title not in seen_titles:
-                            seen_titles.add(accomplishment.title)
-                            accomplishments.append(accomplishment)
-                    except Exception as e:
-                        logger.debug(f"Error parsing {category} item: {e}")
+                # Interpret as (language, proficiency) pairs
+                for i in range(0, len(texts), 2):
+                    name = texts[i]
+                    proficiency = texts[i + 1] if i + 1 < len(texts) else None
+                    if not name:
                         continue
 
-            except Exception as e:
-                logger.debug(f"Error getting {category}s: {e}")
-                continue
+                    accomplishments.append(
+                        Accomplishment(
+                            category="language",
+                            title=name,
+                            issuer=None,
+                            issued_date=None,
+                            credential_id=None,
+                            credential_url=None,
+                            description=proficiency,
+                        )
+                    )
+        except Exception as e:
+            logger.debug(f"Error getting main-page accomplishments: {e}")
 
         return accomplishments
 

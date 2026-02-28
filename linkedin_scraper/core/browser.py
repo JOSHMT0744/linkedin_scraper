@@ -11,6 +11,13 @@ from .exceptions import NetworkError
 
 logger = logging.getLogger(__name__)
 
+# Realistic desktop fingerprint: Chrome on Windows (reduces bot-like detection)
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
+DEFAULT_VIEWPORT = {"width": 1366, "height": 768}
+
 
 class BrowserManager:
     """Async context manager for Playwright browser lifecycle."""
@@ -35,8 +42,8 @@ class BrowserManager:
         """
         self.headless = headless
         self.slow_mo = slow_mo
-        self.viewport = viewport or {"width": 1280, "height": 720}
-        self.user_agent = user_agent
+        self.viewport = viewport or DEFAULT_VIEWPORT
+        self.user_agent = user_agent if user_agent is not None else DEFAULT_USER_AGENT
         self.launch_options = launch_options
         
         self._playwright: Optional[Playwright] = None
@@ -68,13 +75,11 @@ class BrowserManager:
             
             logger.info(f"Browser launched (headless={self.headless})")
             
-            # Create context
+            # Create context (realistic viewport + user agent for headful scraping)
             context_options: Dict[str, Any] = {
                 "viewport": self.viewport,
+                "user_agent": self.user_agent,
             }
-            
-            if self.user_agent:
-                context_options["user_agent"] = self.user_agent
             
             self._context = await self._browser.new_context(**context_options)
             
